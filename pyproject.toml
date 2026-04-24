@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "acrobot"
+version = "1.0.0"
+description = "Acrobot: reinforcement learning game."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11 , <3.12"
+
+dependencies = [
+    "gymnasium[box2d]>=1.2.3",
+    "numpy>=2.4.2",
+    "ruff>=0.15.5",
+    "torch>=2.10.0",
+]
+
+# PyPI serves CPU-only wheels (+cpu). NVIDIA GPU builds live on PyTorch's index:
+# https://pytorch.org/get-started/locally/ — change `cu126` if you need another CUDA flavor.
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cuda" }
+
+[project.scripts]
+acrobot = "acrobot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/acrobot"]

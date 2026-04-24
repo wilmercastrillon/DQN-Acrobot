@@ -1,0 +1,290 @@
+import argparse
+from importlib.metadata import version
+from pathlib import Path
+
+import gymnasium as gym
+import numpy as np
+
+ENV_ID = "Acrobot-v1"
+SAVE_DIR = Path("saves")
+VERSION = version("acrobot")
+
+
+def _save_path(agent_type: str) -> Path:
+    return SAVE_DIR / f"{agent_type}_{ENV_ID}.pt"
+
+
+def _load_agent(agent_type: str):
+    path = _save_path(agent_type)
+    from acrobot.agents.dqn import DQNAgent
+    return DQNAgent.load(path)
+
+
+# ── commands ─────────────────────────────────────────────────────────
+
+
+def cmd_inspect(args: argparse.Namespace) -> None:
+    env_id = args.env or ENV_ID
+    env = gym.make(env_id)
+
+    print(f"Environment: {env_id}\n")
+    print(f"Observation space : {env.observation_space}")
+    print(f"  shape           : {env.observation_space.shape}")
+    if hasattr(env.observation_space, "low"):
+        print(f"  low             : {env.observation_space.low}")
+        print(f"  high            : {env.observation_space.high}")
+    print(f"\nAction space      : {env.action_space}")
+    if hasattr(env.action_space, "n"):
+        print(f"  n actions       : {env.action_space.n}")
+    print(f"Max episode steps : {env.spec.max_episode_steps if env.spec else 'N/A'}")
+
+    n = args.steps
+    print(f"\n-- Sample transitions ({n} steps, random policy) --\n")
+    obs, info = env.reset()
+    print(f"  Initial state: {obs}")
+    print()
+
+    for step in range(1, n + 1):
+        action = env.action_space.sample()
+        next_obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        print(
+            f"  step {step:>3} | action={action} | "
+            f"reward={reward:+.3f} | done={done}"
+        )
+        print(f"           state -> {next_obs}")
+        obs = next_obs
+        if done:
+            print("           [episode ended, resetting]")
+            obs, info = env.reset()
+            print(f"           state -> {obs}")
+        print()
+
+    env.close()
+
+
+def cmd_init(_args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+
+    if path.exists():
+        print(f"Save already exists at {path}. Run 'acrobot delete' first.")
+        return
+
+    from acrobot.agents.dqn import DQNAgent
+    agent = DQNAgent(ENV_ID)
+
+    agent.save(path)
+    print(f"Initialized dqn agent.")
+
+
+def cmd_train(args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+
+    from acrobot.agents.dqn import DQNAgent
+    agent = DQNAgent.load(path) if path.exists() else DQNAgent(ENV_ID)
+    agent.train(total_episodes=args.episodes)
+    agent.save(path)
+
+    print("Training complete.")
+
+
+def cmd_delete(_args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+    if path.exists():
+        path.unlink()
+        print(f"Deleted {path}")
+    else:
+        print(f"No save found at {path}")
+
+
+def cmd_load(args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+    if not path.exists():
+        print(f"No save found at {path}")
+        return
+
+    agent = _load_agent("dqn")
+    print(agent.info())
+
+    if args.eval:
+        print("\nEvaluating (10 episodes) ...")
+        env = gym.make(ENV_ID)
+        rewards = []
+        for _ in range(10):
+            obs, _ = env.reset()
+            done, total = False, 0.0
+            while not done:
+                action, _ = agent.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
+                total += reward
+            rewards.append(total)
+        env.close()
+        print(f"  Mean reward: {np.mean(rewards):.2f} +/- {np.std(rewards):.2f}")
+
+
+ACTION_NAMES = {
+    0: "noop",
+    1: "left engine",
+    2: "main engine",
+    3: "right engine",
+}
+
+
+def _fmt_action(action: int) -> str:
+    name = ACTION_NAMES.get(action, "?")
+    return f"{action} ({name})"
+
+
+def cmd_sim(args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+    if not path.exists():
+        print(f"No save found at {path}")
+        return
+
+    agent = _load_agent("dqn")
+    env = gym.make(ENV_ID)
+
+    all_rewards: list[float] = []
+
+    for ep in range(1, args.episodes + 1):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0.0
+        step = 0
+
+        print(f"== Episode {ep}/{args.episodes} ==\n")
+        print(f"  initial state: {obs}\n")
+
+        limit = args.steps  # None means show all
+
+        while not done:
+            step += 1
+            action, _ = agent.predict(obs, deterministic=True)
+            action = int(action)
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+
+            if limit is None or step <= limit:
+                print(
+                    f"  step {step:>4} | action={_fmt_action(action):>18} | "
+                    f"reward={reward:+8.3f} | total={total_reward:+9.2f}"
+                )
+                if args.verbose:
+                    print(f"           state -> {next_obs}")
+
+            obs = next_obs
+
+        if limit is not None and step > limit:
+            print(f"  ... ({step - limit} more steps) ...")
+
+        outcome = "LANDED" if not terminated else "CRASHED" if total_reward < 0 else "LANDED"
+        if truncated:
+            outcome = "TRUNCATED (time limit)"
+        elif terminated and total_reward < 0:
+            outcome = "CRASHED"
+        else:
+            outcome = "LANDED"
+
+        print(f"\n  Result: {outcome} | Steps: {step} | Total reward: {total_reward:+.2f}\n")
+        all_rewards.append(total_reward)
+
+    env.close()
+
+    if len(all_rewards) > 1:
+        print(
+            f"Summary over {len(all_rewards)} episodes: "
+            f"mean={np.mean(all_rewards):+.2f} +/- {np.std(all_rewards):.2f}"
+        )
+
+
+def cmd_render(args: argparse.Namespace) -> None:
+    path = _save_path("dqn")
+    if not path.exists():
+        print(f"No save found at {path}")
+        return
+
+    agent = _load_agent("dqn")
+    env = gym.make(ENV_ID, render_mode="human")
+
+    for ep in range(1, args.episodes + 1):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0.0
+
+        while not done:
+            action, _ = agent.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+
+        print(f"Episode {ep}/{args.episodes} | Reward: {total_reward:.2f}")
+
+    env.close()
+
+
+def cmd_version(_args: argparse.Namespace) -> None:
+    print(f"acrobot {VERSION}")
+
+
+# ── argument parser ──────────────────────────────────────────────────
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="acrobot",
+        description=f"Train and evaluate RL agents on {ENV_ID}",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # version
+    p = sub.add_parser("version", help="Show the package version")
+    p.set_defaults(func=cmd_version)
+
+    # inspect
+    p = sub.add_parser(
+        "inspect",
+        help="Inspect an environment: show state/action spaces and sample transitions",
+    )
+    p.add_argument("--env", type=str, default=None, help=f"Gymnasium env ID (default: {ENV_ID})")
+    p.add_argument("--steps", type=int, default=5, help="Random steps to sample (default: 5)")
+    p.set_defaults(func=cmd_inspect)
+
+    # init
+    p = sub.add_parser("init", help="Initialize a new (untrained) agent and save it")
+    p.set_defaults(func=cmd_init)
+
+    # train
+    p = sub.add_parser("train", help="Train an agent and save the result")
+    p.add_argument("--episodes", type=int, default=10_000, help="Training episodes (default: 10k)")
+    p.set_defaults(func=cmd_train)
+
+    # delete
+    p = sub.add_parser("delete", help="Delete a saved agent")
+    p.set_defaults(func=cmd_delete)
+
+    # load
+    p = sub.add_parser("load", help="Load a saved agent and display info")
+    p.add_argument("--eval", action="store_true", help="Run a quick 10-episode evaluation")
+    p.set_defaults(func=cmd_load)
+
+    # sim
+    p = sub.add_parser("sim", help="Simulate episodes with a trained agent (text output)")
+    p.add_argument("--episodes", type=int, default=1, help="Number of episodes to simulate (default: 1)")
+    p.add_argument("--steps", type=int, default=None, help="Limit output to the first N steps per episode (default: show all)")
+    p.add_argument("--verbose", action="store_true", help="Print every step with full state vectors")
+    p.set_defaults(func=cmd_sim)
+
+    # render
+    p = sub.add_parser("render", help="Render episodes using a saved agent (graphical window)")
+    p.add_argument("--episodes", type=int, default=1, help="Number of episodes to render (default: 1)")
+    p.set_defaults(func=cmd_render)
+
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+    args.func(args)
